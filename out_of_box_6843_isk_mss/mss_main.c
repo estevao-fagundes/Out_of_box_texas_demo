@@ -638,11 +638,6 @@
 /* Profiler Include Files */
 #include <ti/utils/cycleprofiler/cycle_profiler.h>
 
-#ifdef SYS_COMMON_XWR68XX_LOW_POWER_MODE_EN
-/* Low Power Library Functions*/
-#include <ti/utils/libsleep/libsleep_xwr68xx.h>
-#endif
-
 /**
  * @brief Task Priority settings:
  * Mmwave task is at higher priority because of potential async messages from BSS
@@ -752,6 +747,12 @@ static void MmwDemo_transmitProcessedOutput
     DPC_ObjectDetection_ExecuteResult   *result,
     MmwDemo_output_message_stats        *timingInfo
 );
+static void Custon_transmitProcessedOutput
+(
+    UART_Handle     uartHandle,
+    DPIF_RadarCube_t   *result,
+    MmwDemo_output_message_stats        *timingInfo
+);
 static void MmwDemo_measurementResultOutput(DPU_AoAProc_compRxChannelBiasCfg *compRxChanCfg);
 static int32_t MmwDemo_DPM_ioctl_blocking
 (
@@ -789,11 +790,6 @@ static int32_t MmwDemo_calibInit(void);
 static int32_t MmwDemo_calibSave(MmwDemo_calibDataHeader *ptrCalibDataHdr, MmwDemo_calibData  *ptrCalibrationData);
 static int32_t MmwDemo_calibRestore(MmwDemo_calibData  *calibrationData);
 
-#ifdef SYS_COMMON_XWR68XX_LOW_POWER_MODE_EN
-/*Function for idle power down and up cycle*/
-void idle_power_down(IdleModeCfg   idleModeCfg);
-void idle_power_cycle(IdleModeCfg   idleModeCfg);
-#endif
 /**************************************************************************
  ************************* Millimeter Wave Demo Functions **********************
  **************************************************************************/
@@ -1359,6 +1355,7 @@ static void MmwDemo_measurementResultOutput(DPU_AoAProc_compRxChannelBiasCfg *co
 *   @param[in] result       Pointer to result from object detection DPC processing
 *   @param[in] timingInfo   Pointer to timing information provided from core that runs data path
 */
+
 static void MmwDemo_transmitProcessedOutput
 (
     UART_Handle     uartHandle,
@@ -1381,7 +1378,7 @@ static void MmwDemo_transmitProcessedOutput
     cmplx16ImRe_t *azimuthStaticHeatMap;
     DPIF_PointCloudSideInfo *objOutSideInfo;
     DPC_ObjectDetection_Stats *stats;
-    
+
     /* Get subframe configuration */
     subFrameCfg = &gMmwMssMCB.subFrameCfg[result->subFrameIdx];
 
@@ -1551,7 +1548,7 @@ static void MmwDemo_transmitProcessedOutput
         UART_writePolling (uartHandle,
                            (uint8_t*)timingInfo,
                            tl[tlvIdx].length);
-        tlvIdx++;        
+        tlvIdx++;
         UART_writePolling (uartHandle,
                            (uint8_t*)&tl[tlvIdx],
                            sizeof(MmwDemo_output_message_tl));
@@ -1570,6 +1567,122 @@ static void MmwDemo_transmitProcessedOutput
                             numPaddingBytes);
     }
 
+}
+static void Custom_transmitProcessedOutput
+(
+    UART_Handle     uartHandle,
+    DPIF_RadarCube_t   *result,
+    MmwDemo_output_message_stats        *timingInfo
+)
+{
+    MmwDemo_output_message_header header;
+    MmwDemo_GuiMonSel   *pGuiMonSel;
+    MmwDemo_SubFrameCfg *subFrameCfg;
+    uint32_t tlvIdx = 0;
+    uint32_t index;
+    uint32_t numPaddingBytes;
+    uint32_t packetLen;
+    uint8_t padding[MMWDEMO_OUTPUT_MSG_SEGMENT_LEN];
+    MmwDemo_output_message_tl   tl[MMWDEMO_OUTPUT_MSG_MAX];
+    int32_t errCode;
+    uint16_t *data_address_translated ;
+    DPIF_PointCloudCartesian *objOut;
+    cmplx16ImRe_t *azimuthStaticHeatMap;
+    DPIF_PointCloudSideInfo *objOutSideInfo;
+    DPC_ObjectDetection_Stats *stats;
+    
+    /* Get subframe configuration */
+    subFrameCfg = &gMmwMssMCB.subFrameCfg[result->subFrameIdx];
+
+    /* Get Gui Monitor configuration */
+    pGuiMonSel = &subFrameCfg->guiMonSel;
+
+    /* Clear message header */
+    memset((void *)&header, 0, sizeof(MmwDemo_output_message_header));
+
+    /******************************************************************
+       Send out data that is enabled, Since processing results are from DSP,
+       address translation is needed for buffer pointers
+    *******************************************************************/
+    {
+        data_address_translated = (uint16_t *) SOC_translateAddress((uint32_t)detMatrix,
+                                                     SOC_TranslateAddr_Dir_FROM_OTHER_CPU,
+                                                     &errCode);
+        DebugP_assert ((uint32_t)detMatrix!= SOC_TRANSLATEADDR_INVALID);
+
+        objOut = (DPIF_PointCloudCartesian *) SOC_translateAddress((uint32_t)result->objOut,
+                                                     SOC_TranslateAddr_Dir_FROM_OTHER_CPU,
+                                                     &errCode);
+        DebugP_assert ((uint32_t)objOut != SOC_TRANSLATEADDR_INVALID);
+
+        objOutSideInfo = (DPIF_PointCloudSideInfo *) SOC_translateAddress((uint32_t)result->objOutSideInfo,
+                                                     SOC_TranslateAddr_Dir_FROM_OTHER_CPU,
+                                                     &errCode);
+        DebugP_assert ((uint32_t)objOutSideInfo != SOC_TRANSLATEADDR_INVALID);
+
+        stats = (DPC_ObjectDetection_Stats *) SOC_translateAddress((uint32_t)result->stats,
+                                                     SOC_TranslateAddr_Dir_FROM_OTHER_CPU,
+                                                     &errCode);
+        DebugP_assert ((uint32_t)stats != SOC_TRANSLATEADDR_INVALID);
+
+
+        result->data = (void *) SOC_translateAddress((uint32_t) result->data,
+                                                     SOC_TranslateAddr_Dir_FROM_OTHER_CPU,
+                                                     &errCode);
+        DebugP_assert ((uint32_t) result->radarCube.data!= SOC_TRANSLATEADDR_INVALID);
+    }
+
+    /* Header: */
+    header.platform =  0xA6843;
+    header.magicWord[0] = 0x0102;
+    header.magicWord[1] = 0x0304;
+    header.magicWord[2] = 0x0506;
+    header.magicWord[3] = 0x0708;
+    header.numDetectedObj = 1;
+    header.version =    MMWAVE_SDK_VERSION_BUILD |
+                        (MMWAVE_SDK_VERSION_BUGFIX << 8) |
+                        (MMWAVE_SDK_VERSION_MINOR << 16) |
+                        (MMWAVE_SDK_VERSION_MAJOR << 24);
+
+
+    header.numTLVs = tlvIdx;
+    /* Round up packet length to multiple of MMWDEMO_OUTPUT_MSG_SEGMENT_LEN */
+    header.totalPacketLen = MMWDEMO_OUTPUT_MSG_SEGMENT_LEN *
+            ((packetLen + (MMWDEMO_OUTPUT_MSG_SEGMENT_LEN-1))/MMWDEMO_OUTPUT_MSG_SEGMENT_LEN);
+    header.timeCpuCycles = Pmu_getCount(0);
+    header.frameNumber = stats->frameStartIntCounter;
+    header.subFrameNumber = result->subFrameIdx;
+
+
+
+    /* Send message(details of the board, and package(need adptation) */
+
+    UART_writePolling (uartHandle,
+                      (uint8_t*)&header,
+                       sizeof(MmwDemo_output_message_header));
+    /* Send data (need to check if this will work, maybe the tensor is to large for this routine to handle*/
+    /*Maybe is necessary send only one bin(fixed position)*/
+    UART_writePolling (uartHandle, (uint8_t*)data_address_translated,
+                               sizeof(DPIF_PointCloudCartesian) * result->data);
+            ;
+
+
+    /*Send timing info*/
+    UART_writePolling (uartHandle,
+                       (uint8_t*)timingInfo,
+                       tl[tlvIdx].length);
+
+   /*Is necessary to check if padding bytes is needed*/
+
+    /* Send padding bytes */
+    /*numPaddingBytes = MMWDEMO_OUTPUT_MSG_SEGMENT_LEN - (packetLen & (MMWDEMO_OUTPUT_MSG_SEGMENT_LEN-1));
+    if (numPaddingBytes<MMWDEMO_OUTPUT_MSG_SEGMENT_LEN)
+    {
+        UART_writePolling (uartHandle,
+                            (uint8_t*)padding,
+                            numPaddingBytes);
+    }
+    */
 }
 
 /**************************************************************************
@@ -2115,7 +2228,6 @@ static int32_t MmwDemo_dataPathConfig (void)
             staticCfg->numRangeBins = RFparserOutParams.numRangeBins;
             staticCfg->numTxAntennas = RFparserOutParams.numTxAntennas;
             staticCfg->numVirtualAntennas = RFparserOutParams.numVirtualAntennas;
-            staticCfg->centerFreq = RFparserOutParams.centerFreq;
 
             /* Current 68xx SOC has higher receive level as compared to 18xx and hence using higher value for 
              * fftOutputDivShift to avoid overflow when converting from 24-bit to 16-bit
@@ -2195,7 +2307,6 @@ static int32_t MmwDemo_dataPathConfig (void)
             objDetPreStartDspCfg.staticCfg.numVirtualAntennas = RFparserOutParams.numVirtualAntennas;
             objDetPreStartDspCfg.staticCfg.rangeStep = RFparserOutParams.rangeStep;
             objDetPreStartDspCfg.staticCfg.isBpmEnabled = subFrameCfg->bpmCfg.isEnabled;
-            objDetPreStartDspCfg.staticCfg.centerFreq = RFparserOutParams.centerFreq;
             for (idx = 0; idx < RFparserOutParams.numRxAntennas; idx++)
             {
                 objDetPreStartDspCfg.staticCfg.rxAntOrder[idx] = RFparserOutParams.rxAntOrder[idx];
@@ -4184,407 +4295,6 @@ void MmwDemo_sleep(void)
     asm(" WFI ");
 }
 
-#ifdef SYS_COMMON_XWR68XX_LOW_POWER_MODE_EN
-/**
- *  @b Description
- *  @n
- *      Idle power sequence: Performs power down and up cycle by performing following functions
- *
- *      -DSP Powered Off
- *      -MSS VCLK slowed to 40 MHz (to allow for CAN functionality)
- *      -RF Analog Power Down
- *      -APLL Power Down
- *
- *      -Wait 1 millisecond
- *
- *      -APLL Power Up
- *      -RF Analog Power Up
- *      -MSS VCLK sped up to 200 MHz
- *
- *
- *
- *      NOTE: This sequence does not power DSP back on
- *
- *
- *  @retval  None
- */
-void idle_power_cycle(IdleModeCfg   idleModeCfg)
-{
-    int32_t             errCode;
-    rlReturnVal_t             retVal;
-    rlPowerSaveModeCfg_t        data_rf_down;
-    rlPowerSaveModeCfg_t        data_rf_up;
-    rlPowerSaveModeCfg_t        data_apll_down;
-    rlPowerSaveModeCfg_t        data_apll_up;
-
-    //Enable DSP Shutdown
-    int8_t enDSPpowerdown = idleModeCfg.enDSPpowerdown;
-    //Enable DSS Clock Gate (No Shutdown)
-    int8_t enDSSclkgate = idleModeCfg.enDSSclkgate;
-    //Enable switching of MSS VCLK
-    int8_t enMSSvclkgate = idleModeCfg.enMSSvclkgate;
-    //Enable BSS Clock Gate
-    int8_t enBSSclkgate = idleModeCfg.enBSSclkgate;
-    //Enable Power switching of RF
-    int8_t enRFpowerdown = idleModeCfg.enRFpowerdown;
-    //Enable Power switching of APLL
-    int8_t enAPLLpowerdown = idleModeCfg.enAPLLpowerdown;
-    //Enable Power switching of APLL
-    int8_t enAPLLGPADCpowerdown = idleModeCfg.enAPLLGPADCpowerdown;
-
-       //OPTIONAL: Delay between successive
-       // in microseconds. (Recommended is 0)
-    uint32_t ttime = idleModeCfg.idleModeMicroDelay;
-
-       //OPTIONAL: Delay after power down sequence
-       // in microseconds. (Recommended is 1000000)
-    uint32_t offtime = idleModeCfg.idleModeMicroDelay;
-
-
-    if(enMSSvclkgate||enAPLLpowerdown||enAPLLGPADCpowerdown)
-    {
-        //MSSvclkgate and APLLpowerdown components slow
-        //system clock from 200 MHz to 40 MHz, so adjusting delays
-        //by a factor of 5
-        ttime /= 5;
-        offtime /=5;
-    }
-
-       gMmwMssMCB.sensorState = MmwDemo_SensorState_INIT;
-       MMWave_close(gMmwMssMCB.ctrlHandle,&errCode);
-
-       // The sensor has been stopped successfully. Switch off the LED
-           GPIO_write (gMmwMssMCB.cfg.platformCfg.SensorStatusGPIO, 0U);
-
-
-     //BEGIN POWER DOWN SEQUENCE
-
-
-       /* The sensor has been stopped successfully. Switch off the LED */
-           GPIO_write (gMmwMssMCB.cfg.platformCfg.SensorStatusGPIO, 0U);
-
-       //DSP Powered Off (There is no power on)
-      if(enDSPpowerdown == 1)
-      {
-        xWR6843_dss_power_down();
-        SOC_microDelay(ttime); //delay function (default 0 microsecond)
-      }
-
-      //DSS Clock Gate
-      if(enDSSclkgate == 1)
-      {
-          xWR6843_dss_clock_gate();
-        SOC_microDelay(ttime); //delay function (default 0 microsecond)
-      }
-
-      // MSS VCLK slowed to 40 MHz
-      if(enMSSvclkgate == 1)
-      {
-        xWR6843_mss_vclk_40M();
-        SOC_microDelay(ttime); //delay function (default 0 microsecond)
-      }
-
-      //RF Analog Power Down
-     if(enRFpowerdown == 1)
-     {
-
-
-         data_rf_down.lowPwrStateTransCmd = 1;
-         retVal = rlSetPowerSaveModeConfig(RL_DEVICE_INDEX_INTERNAL_DSS_MSS, &data_rf_down);
-         if (retVal != 0)
-         {
-             System_printf("RF Off Failed Err: %d\n", retVal);
-
-         }
-
-
-
-        SOC_microDelay(ttime); //delay function (default 0 microsecond)
-     }
-
-    //APLL + GPADC Power Down
-    if(enAPLLGPADCpowerdown == 1)
-    {
-        data_apll_down.lowPwrStateTransCmd = 5;
-        retVal = rlSetPowerSaveModeConfig(RL_DEVICE_INDEX_INTERNAL_DSS_MSS, &data_apll_down);
-       if (retVal != 0)
-        {
-            System_printf("APLL + GPADC Off Failed Err: %d\n", retVal);
-
-        }
-
-        SOC_microDelay(ttime); //delay function (default 0 microsecond)
-
-    }
-    //APLL Power Down
-    else if(enAPLLpowerdown == 1)
-    {
-
-            data_apll_down.lowPwrStateTransCmd = 3;
-            retVal = rlSetPowerSaveModeConfig(RL_DEVICE_INDEX_INTERNAL_DSS_MSS, &data_apll_down);
-           if (retVal != 0)
-            {
-                System_printf("APLL Off Failed Err: %d\n", retVal);
-
-            }
-
-            SOC_microDelay(ttime); //delay function (default 0 microsecond)
-    }
-
-
-    //BSS Clock gate
-    //(Performed last because RF/APLL functions require BSS Clock)
-    if(enBSSclkgate== 1)
-    {
-    SOC_haltBSS(gMmwMssMCB.socHandle, &errCode);
-    }
-
-
-
-    // Optional delay
-    SOC_microDelay(offtime);
-
-
-
-    //BEGIN POWER UP SEQUENCE
-    //BSS Clock Ungate
-
-    if(enBSSclkgate== 1)
-    {
-    SOC_unhaltBSS(gMmwMssMCB.socHandle, &errCode);
-    }
-
-    //APLL + GPADC Power Down
-    if(enAPLLGPADCpowerdown == 1)
-    {
-        data_apll_up.lowPwrStateTransCmd = 6;
-        retVal = rlSetPowerSaveModeConfig(RL_DEVICE_INDEX_INTERNAL_DSS_MSS, &data_apll_up);
-        if (retVal != 0)
-        {
-            System_printf("APLL ON Failed Err: %d\n", retVal);
-        }
-
-      SOC_microDelay(ttime); //delay function (default 0 microsecond)
-    }
-    //APLL Power Up
-    else if(enAPLLpowerdown == 1)
-    {
-
-        data_apll_up.lowPwrStateTransCmd = 4;
-        retVal = rlSetPowerSaveModeConfig(RL_DEVICE_INDEX_INTERNAL_DSS_MSS, &data_apll_up);
-        if (retVal != 0)
-        {
-            System_printf("APLL ON Failed Err: %d\n", retVal);
-        }
-
-      SOC_microDelay(ttime); //delay function (default 0 microsecond)
-    }
-
-    //RF Analog Power Up
-    if(enRFpowerdown == 1)
-    {
-
-     data_rf_up.lowPwrStateTransCmd = 2;
-     retVal = rlSetPowerSaveModeConfig(RL_DEVICE_INDEX_INTERNAL_DSS_MSS, &data_rf_up);
-      if (retVal != 0)
-      {
-          System_printf("RF On Failed Err: %d\n", retVal);
-      }
-
-      SOC_microDelay(ttime); //delay function (default 0 microsecond)
-    }
-
-    //MSS VCLK sped up to 200 MHz
-    if(enMSSvclkgate == 1)
-    {
-        xWR6843_mss_vclk_200M();
-        SOC_microDelay(ttime); //delay function (default 0 microsecond)
-    }
-
-    //DSS Clock Ungate
-    if(enDSSclkgate == 1)
-    {
-        xWR6843_dss_clock_ungate();
-      SOC_microDelay(ttime); //delay function (default 0 microsecond)
-    }
-
-
-
-    //END POWER UP SEQUENCE
-
-
-    //Turn LED back on
-        GPIO_write (gMmwMssMCB.cfg.platformCfg.SensorStatusGPIO, 1U);
-
-}
-
-
-
-/**
- *  @b Description
- *  @n
- *      Idle power sequence: Performs power down and up cycle by performing following functions
- *
- *      -DSP Powered Off
- *      -MSS VCLK slowed to 40 MHz (to allow for CAN functionality)
- *      -RF Analog Power Down
- *      -APLL Power Down
- *
- *      -Wait 1 millisecond
- *
- *      -APLL Power Up
- *      -RF Analog Power Up
- *      -MSS VCLK sped up to 200 MHz
- *
- *
- *
- *      NOTE: This sequence does not power DSP back on
- *
- *
- *  @retval  None
- */
-void idle_power_down(IdleModeCfg   idleModeCfg)
-{
-    int32_t             errCode;
-    rlReturnVal_t             retVal;
-    rlPowerSaveModeCfg_t        data_rf_down;
-    rlPowerSaveModeCfg_t        data_apll_down;
-
-    //Enable DSP Shutdown
-    int8_t enDSPpowerdown = idleModeCfg.enDSPpowerdown;
-    //Enable DSS Clock Gate (No Shutdown)
-    int8_t enDSSclkgate = idleModeCfg.enDSSclkgate;
-    //Enable switching of MSS VCLK
-    int8_t enMSSvclkgate = idleModeCfg.enMSSvclkgate;
-    //Enable BSS Clock Gate
-    int8_t enBSSclkgate = idleModeCfg.enBSSclkgate;
-    //Enable Power switching of RF
-    int8_t enRFpowerdown = idleModeCfg.enRFpowerdown;
-    //Enable Power switching of APLL
-    int8_t enAPLLpowerdown = idleModeCfg.enAPLLpowerdown;
-    //Enable Power switching of APLL
-    int8_t enAPLLGPADCpowerdown = idleModeCfg.enAPLLGPADCpowerdown;
-
-       //OPTIONAL: Delay between successive
-       // in microseconds. (Recommended is 0)
-    uint32_t ttime = idleModeCfg.idleModeMicroDelay;
-
-       //OPTIONAL: Delay after power down sequence
-       // in microseconds. (Recommended is 1000000)
-    uint32_t offtime = idleModeCfg.idleModeMicroDelay;
-
-
-    if(enMSSvclkgate||enAPLLpowerdown||enAPLLGPADCpowerdown)
-    {
-        //MSSvclkgate and APLLpowerdown components slow
-        //system clock from 200 MHz to 40 MHz, so adjusting delays
-        //by a factor of 5
-        ttime /= 5;
-        offtime /=5;
-    }
-
-       gMmwMssMCB.sensorState = MmwDemo_SensorState_INIT;
-       MMWave_close(gMmwMssMCB.ctrlHandle,&errCode);
-
-       // The sensor has been stopped successfully. Switch off the LED
-           GPIO_write (gMmwMssMCB.cfg.platformCfg.SensorStatusGPIO, 0U);
-
-
-     //BEGIN POWER DOWN SEQUENCE
-
-
-       /* The sensor has been stopped successfully. Switch off the LED */
-           GPIO_write (gMmwMssMCB.cfg.platformCfg.SensorStatusGPIO, 0U);
-
-       //DSP Powered Off (There is no power on)
-      if(enDSPpowerdown == 1)
-      {
-        xWR6843_dss_power_down();
-        SOC_microDelay(ttime); //delay function (default 0 microsecond)
-      }
-
-      //DSS Clock Gate
-      if(enDSSclkgate == 1)
-      {
-          xWR6843_dss_clock_gate();
-        SOC_microDelay(ttime); //delay function (default 0 microsecond)
-      }
-
-      // MSS VCLK slowed to 40 MHz
-      if(enMSSvclkgate == 1)
-      {
-        xWR6843_mss_vclk_40M();
-        SOC_microDelay(ttime); //delay function (default 0 microsecond)
-      }
-
-      //RF Analog Power Down
-     if(enRFpowerdown == 1)
-     {
-
-
-         data_rf_down.lowPwrStateTransCmd = 1;
-         retVal = rlSetPowerSaveModeConfig(RL_DEVICE_INDEX_INTERNAL_DSS_MSS, &data_rf_down);
-         if (retVal != 0)
-         {
-             System_printf("RF Off Failed Err: %d\n", retVal);
-
-         }
-
-
-
-        SOC_microDelay(ttime); //delay function (default 0 microsecond)
-     }
-
-    //APLL + GPADC Power Down
-    if(enAPLLGPADCpowerdown == 1)
-    {
-        data_apll_down.lowPwrStateTransCmd = 5;
-        retVal = rlSetPowerSaveModeConfig(RL_DEVICE_INDEX_INTERNAL_DSS_MSS, &data_apll_down);
-       if (retVal != 0)
-        {
-            System_printf("APLL + GPADC Off Failed Err: %d\n", retVal);
-
-        }
-
-        SOC_microDelay(ttime); //delay function (default 0 microsecond)
-
-    }
-    //APLL Power Down
-    else if(enAPLLpowerdown == 1)
-    {
-
-            data_apll_down.lowPwrStateTransCmd = 3;
-            retVal = rlSetPowerSaveModeConfig(RL_DEVICE_INDEX_INTERNAL_DSS_MSS, &data_apll_down);
-           if (retVal != 0)
-            {
-                System_printf("APLL Off Failed Err: %d\n", retVal);
-
-            }
-
-            SOC_microDelay(ttime); //delay function (default 0 microsecond)
-    }
-
-
-    //BSS Clock gate
-    //(Performed last because RF/APLL functions require BSS Clock)
-    if(enBSSclkgate== 1)
-    {
-    SOC_haltBSS(gMmwMssMCB.socHandle, &errCode);
-    }
-
-
-
-    // Optional delay
-    SOC_microDelay(offtime);
-
-
-    //END OF POWER DOWN SEQUENCE
-    //WILL NOT POWER BACK ON
-    //UNLESS HARD RESET OF DEVICE
-
-}
-#endif /* SYS_COMMON_XWR68XX_LOW_POWER_MODE_EN */
-
 /**
  *  @b Description
  *  @n
@@ -4619,14 +4329,6 @@ int main (void)
         System_printf ("Error: SOC Module Initialization failed [Error code %d]\n", errCode);
         MmwDemo_debugAssert (0);
         return -1;
-    }
-
-    /* Wait for BSS powerup */
-    if (SOC_waitBSSPowerUp(socHandle, &errCode) < 0)
-    {
-        /* Debug Message: */
-        System_printf ("Debug: SOC_waitBSSPowerUp failed with Error [%d]\n", errCode);
-        return 0;
     }
 
     /* Check if the SOC is a secure device */
